@@ -51,6 +51,3 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 - React Hook Form and Yup
 - Chart.js with `react-chartjs-2`
 
-## Firebase
-
-Firebase app configuration is currently defined in `src/firebase.js`. Replace it with configuration for your own Firebase project before deploying the app. Enable the Firebase services required by the authentication and analytics flows in the Firebase console.
