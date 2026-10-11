@@ -47,7 +47,6 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 - Next.js 16
 - React 18
-- Firebase Analytics
 - Axios
 - React Hook Form and Yup
 - Chart.js with `react-chartjs-2`
