@@ -44,6 +44,27 @@ const AppContext = createContext(null);
 const useAuth = () => useContext(AuthContext);
 const useApp = () => useContext(AppContext);
 const pick = (res) => res?.data?.data ?? res?.data;
+const extractBooks = (response) => {
+  const data = pick(response);
+  return Array.isArray(data) ? data : data?.results || data?.books || [];
+};
+const normalizeBookValue = (value) =>
+  String(value ?? "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase();
+const isSameBook = (first, second) => {
+  if (!first || !second) return false;
+  if (first._id && second._id && first._id === second._id) return true;
+  const firstTitle = normalizeBookValue(first.title);
+  const secondTitle = normalizeBookValue(second.title);
+  const firstAuthor = normalizeBookValue(first.author);
+  const secondAuthor = normalizeBookValue(second.author);
+  if (firstTitle && secondTitle && firstAuthor && secondAuthor)
+    return firstTitle === secondTitle && firstAuthor === secondAuthor;
+  return Boolean(first._id && second._id && first._id === second._id);
+};
 const errorText = (e) =>
   e?.response?.data?.message ||
   e?.response?.data?.error ||
@@ -571,12 +592,22 @@ function AddBookForm({ onAdded }) {
     } = useForm({ resolver: yupResolver(bookSchema) });
   const submit = async (values) => {
     try {
+      const ownedBooks = extractBooks(await api.get("/books/own"));
+      if (
+        ownedBooks.some((book) =>
+          isSameBook(book, { title: values.title, author: values.author }),
+        )
+      ) {
+        notify("This book is already in your library.");
+        return;
+      }
       await api.post("/books/add", {
         ...values,
         totalPages: Number(values.totalPages),
       });
       reset();
       onAdded?.();
+      window.dispatchEvent(new Event("rj-library-updated"));
       setModal({
         type: "success",
         title: "Good job",
@@ -584,7 +615,11 @@ function AddBookForm({ onAdded }) {
         action: "Good job",
       });
     } catch (e) {
-      notify(errorText(e));
+      notify(
+        e?.response?.status === 409
+          ? "This book is already in your library."
+          : errorText(e),
+      );
     }
   };
   return (
@@ -626,6 +661,7 @@ function Recommended() {
     params = useMemo(() => new URLSearchParams(search), [search]),
     { notify, setModal } = useApp(),
     [books, setBooks] = useState([]),
+    [ownedBooks, setOwnedBooks] = useState([]),
     [page, setPage] = useState(1),
     [total, setTotal] = useState(0),
     [loading, setLoading] = useState(true);
@@ -633,6 +669,20 @@ function Recommended() {
   const limit = 10;
   useEffect(() => {
     setSearch(window.location.search);
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    const loadOwnedBooks = () =>
+      api
+        .get("/books/own")
+        .then((response) => alive && setOwnedBooks(extractBooks(response)))
+        .catch((e) => alive && notify(errorText(e)));
+    loadOwnedBooks();
+    window.addEventListener("rj-library-updated", loadOwnedBooks);
+    return () => {
+      alive = false;
+      window.removeEventListener("rj-library-updated", loadOwnedBooks);
+    };
   }, []);
   useEffect(() => {
     setPage(Number(params.get("page")) || 1);
@@ -750,9 +800,17 @@ function Recommended() {
               <BookCard
                 key={book._id}
                 book={book}
-                onClick={() =>
-                  setModal({ type: "book", book, action: "Add to library" })
-                }
+                onClick={() => {
+                  const ownedBook = ownedBooks.find((item) =>
+                    isSameBook(item, book),
+                  );
+                  setModal({
+                    type: "book",
+                    book: ownedBook || book,
+                    action: ownedBook ? "Start reading" : "Add to library",
+                    library: Boolean(ownedBook),
+                  });
+                }}
               />
             ))
           ) : (
@@ -934,14 +992,15 @@ function Library() {
     api
       .get("/books/own", { params: status ? { status } : {} })
       .then((r) => {
-        const d = pick(r);
-        setBooks(Array.isArray(d) ? d : d?.results || []);
+        setBooks(extractBooks(r));
       })
       .catch((e) => notify(errorText(e)))
       .finally(() => setLoading(false));
   };
   useEffect(() => {
     load();
+    window.addEventListener("rj-library-updated", load);
+    return () => window.removeEventListener("rj-library-updated", load);
   }, [status]);
   useEffect(() => {
     let alive = true;
@@ -969,9 +1028,8 @@ function Library() {
       notify(errorText(e));
     }
   };
-  const ownedIds = new Set(books.map((book) => book._id));
   const recommendedToShow = recommended
-    .filter((book) => !ownedIds.has(book._id))
+    .filter((book) => !books.some((owned) => isSameBook(owned, book)))
     .slice(0, 5);
   const recommendationsPanel = (
     <LibraryRecommendations
@@ -1494,7 +1552,8 @@ function Statistics({ progress, book }) {
 
 function Modal({ modal, close }) {
   const { notify } = useApp(),
-    router = useRouter();
+    router = useRouter(),
+    [isAdding, setIsAdding] = useState(false);
   useEffect(() => {
     const esc = (e) => e.key === "Escape" && close();
     window.addEventListener("keydown", esc);
@@ -1513,12 +1572,27 @@ function Modal({ modal, close }) {
       return;
     }
     if (!isLibraryBook) {
+      if (isAdding) return;
+      setIsAdding(true);
       try {
+        const ownedBooks = extractBooks(await api.get("/books/own"));
+        if (ownedBooks.some((ownedBook) => isSameBook(ownedBook, book))) {
+          notify("This book is already in your library.");
+          close();
+          return;
+        }
         await api.post(`/books/add/${book._id}`);
         notify("Book added to your library.");
+        window.dispatchEvent(new Event("rj-library-updated"));
         close();
       } catch (e) {
-        notify(errorText(e));
+        notify(
+          e?.response?.status === 409
+            ? "This book is already in your library."
+            : errorText(e),
+        );
+      } finally {
+        setIsAdding(false);
       }
     } else {
       localStorage.setItem("rj-reading-book", book._id);
@@ -1581,8 +1655,12 @@ function Modal({ modal, close }) {
               {book.description && (
                 <p className="book-description">{book.description}</p>
               )}
-              <button className="button button-dark full-button" onClick={act}>
-                {actionLabel}
+              <button
+                className="button button-dark full-button"
+                onClick={act}
+                disabled={isAdding}
+              >
+                {isAdding ? "Adding…" : actionLabel}
               </button>
             </div>
           </>
